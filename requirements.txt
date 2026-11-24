@@ -1,0 +1,8 @@
+faiss-cpu
+pymupdf4llm
+langchain-text-splitters
+sentence-transformers
+google-genai
+python-dotenv
+pydantic
+tavily-python
