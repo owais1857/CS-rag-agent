@@ -19,7 +19,7 @@ MAX_ANSWER_CHARS = 900  # ~150-180 words; enforced in Python to avoid JSON trunc
 
 # Tavily web search limits (pinned to basic depth to keep latency and credit usage low)
 WEB_MAX_RESULTS = 3
-WEB_SNIPPET_MAX_CHARS = 400
+WEB_SNIPPET_MAX_CHARS = 900
 WEB_TIMEOUT_SECONDS = 10
 
 # Permitted domain scope for the input classifier
