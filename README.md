@@ -32,3 +32,27 @@ agent/
 ├── main.py               # Interactive CLI entry point
 ├── .env.example          # Required environment variables template
 └── requirements.txt
+```
+
+## Quick Start
+
+1. **Create a virtual environment and install dependencies:**
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install -r requirements.txt
+   ```
+
+2. **Configure API keys:**
+   Copy `.env.example` to `.env` and fill in your `GEMINI_API_KEY` and `TAVILY_API_KEY`.
+
+3. **Build the local vector index:**
+   Drop your CS PDF notes into `data/rawdata/` and run:
+   ```powershell
+   python rag/ingest.py
+   ```
+
+4. **Run the agent:**
+   ```powershell
+   python main.py
+   ```
