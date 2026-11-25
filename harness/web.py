@@ -20,12 +20,11 @@ load_dotenv()
 HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
-def _sanitize_snippet(text: str) -> str:
-    """Strip invisible Unicode, residual HTML tags, and cap snippet length."""
+def _normalize_web_text(text: str) -> str:
+    """Strip invisible Unicode, HTML tags/comments, and irregular whitespace."""
     text = strip_invisible_unicode(text)
-    text = HTML_TAG_PATTERN.sub(" ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return truncate_cleanly(text, WEB_SNIPPET_MAX_CHARS)
+    text = HTML_TAG_PATTERN.sub("", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 class WebSearcher:
@@ -72,29 +71,26 @@ class WebSearcher:
         dropped_count = 0
 
         for item in raw_results:
-            raw_title = strip_invisible_unicode(str(item.get("title") or "Untitled")).strip()
-            raw_content = str(item.get("content") or "")
+            # Normalize into final plain-text form before scanning so obfuscated
+            # tags or irregular whitespace cannot bypass injection detection.
+            norm_title = _normalize_web_text(str(item.get("title") or "")) or "Untitled"
+            norm_content = _normalize_web_text(str(item.get("content") or ""))
             url = str(item.get("url") or "").strip()
 
-            if not raw_content.strip() or not url:
+            if not norm_content or not url:
                 continue
 
-            # Scan full untrusted title and content before truncation to drop
-            # snippets carrying prompt-injection payloads anywhere in the text.
-            if contains_injection(raw_title) or contains_injection(raw_content):
+            # Scan full normalized title and content before truncation
+            if contains_injection(norm_title) or contains_injection(norm_content):
                 dropped_count += 1
-                continue
-
-            snippet = _sanitize_snippet(raw_content)
-            if not snippet:
                 continue
 
             safe_results.append(
                 {
                     "source_id": f"web_{len(safe_results) + 1}",
-                    "title": truncate_cleanly(raw_title, 120),
+                    "title": truncate_cleanly(norm_title, 120),
                     "url": url,
-                    "snippet": snippet,
+                    "snippet": truncate_cleanly(norm_content, WEB_SNIPPET_MAX_CHARS),
                 }
             )
 
