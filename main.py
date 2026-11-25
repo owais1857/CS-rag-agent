@@ -13,7 +13,7 @@ def prompt_web_approval(query: str, reason: str) -> bool:
 def main() -> None:
     print("Loading local FAISS index, Gemini client, and Tavily web client...")
     agent = CSAgentHarness()
-    print("Ready! Type a CS fundamentals question (or 'exit').\n")
+    print("Ready! Type a CS fundamentals question (or '/clear' to reset memory, 'exit' to quit).\n")
 
     while True:
         query = input("You: ").strip()
@@ -21,12 +21,19 @@ def main() -> None:
             continue
         if query.lower() in {"exit", "quit"}:
             break
+        if query.lower() == "/clear":
+            agent.clear_memory()
+            print("\n[Memory Cleared] Session memory reset (0/3 turns).\n")
+            continue
 
         try:
             result = agent.ask(query, confirm_web=prompt_web_approval)
         except Exception as exc:
             print(f"\n[Error] {exc}\n")
             continue
+
+        if result.get("rewritten_query"):
+            print(f"\n[Resolved Query] {result['rewritten_query']}")
 
         print(f"\n{result['output']}")
         u = result["usage"]
@@ -39,6 +46,7 @@ def main() -> None:
             extras.append(f"web_cache={web_meta['cache_hit']}")
             if web_meta["dropped_snippets"]:
                 extras.append(f"dropped={web_meta['dropped_snippets']}")
+        extras.append(f"mem={result['memory_turns']}/{result['memory_max']}")
 
         extra_str = f" | {' | '.join(extras)}" if extras else ""
         print(

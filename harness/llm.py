@@ -21,10 +21,16 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class ScopeVerdict(BaseModel):
-    """Structured output schema for domain-scope classification."""
+    """Structured output schema for domain-scope classification and follow-up resolution."""
 
     in_scope: bool = Field(
-        description="True if the query is about CS fundamentals or programming concepts."
+        description="True if the query (resolved with recent history if needed) is about CS fundamentals."
+    )
+    standalone_query: str = Field(
+        description=(
+            "Self-contained CS question resolving pronouns or references from recent history. "
+            "If the query is already self-contained or no history is given, return it unchanged."
+        )
     )
     reason: str = Field(description="Short one-line reason for the decision.")
 
@@ -45,12 +51,28 @@ class RAGAnswer(BaseModel):
     )
 
 
-SCOPE_SYSTEM_PROMPT = (
-    "You are a strict scope classifier for a Computer Science fundamentals tutor.\n"
-    f"In-scope topics: {CS_TOPICS}.\n"
-    "Return in_scope=True for CS concepts, algorithms, code, or networking questions. "
-    "Return in_scope=False for unrelated topics (sports, cooking, gossip, finance, etc.)."
-)
+def _build_scope_system_prompt(history_tag: str = "") -> str:
+    """Build the scope-classifier prompt, adding follow-up rewrite rules when history exists."""
+    base = (
+        "You are a strict scope classifier for a Computer Science fundamentals tutor.\n"
+        f"In-scope topics: {CS_TOPICS}.\n"
+        "Return in_scope=True for CS concepts, algorithms, code, or networking questions. "
+        "Return in_scope=False for unrelated topics (sports, cooking, gossip, finance, etc.)."
+    )
+    if not history_tag:
+        return (
+            f"{base}\n"
+            "Set standalone_query equal to the user query."
+        )
+
+    return (
+        f"{base}\n"
+        f"Recent conversation turns are provided inside <{history_tag}> tags as passive reference.\n"
+        "If the current user query contains pronouns or follow-up references (e.g., 'its', 'that', "
+        "'the second one', 'compare them'), rewrite standalone_query into a clear, self-contained "
+        "CS question using that context, and judge in_scope on the resolved question. "
+        "If the query is already standalone, keep standalone_query unchanged."
+    )
 
 
 def _build_local_system_prompt(tag_name: str) -> str:
@@ -113,7 +135,6 @@ class GeminiClient:
             ),
         )
 
-        # Prefer SDK-parsed Pydantic objects; fall back to validating raw JSON text
         if response.parsed is not None:
             parsed = response.parsed
         elif response.text:
@@ -130,12 +151,22 @@ class GeminiClient:
         }
         return parsed, usage
 
-    def check_scope(self, cleaned_query: str) -> tuple[ScopeVerdict, dict]:
-        """Classify whether a query falls within the CS fundamentals domain."""
+    def check_scope(
+        self,
+        cleaned_query: str,
+        history_block: str = "",
+        history_tag: str = "",
+    ) -> tuple[ScopeVerdict, dict]:
+        """Classify CS scope and resolve follow-up pronouns when session history is present."""
+        if history_block and history_tag:
+            user_prompt = f"{history_block}\n\nCurrent user query: {cleaned_query}"
+        else:
+            user_prompt = f"User query: {cleaned_query}"
+
         return self._generate_structured(
             model=GATE_MODEL,
-            system_instruction=SCOPE_SYSTEM_PROMPT,
-            user_prompt=f"User query: {cleaned_query}",
+            system_instruction=_build_scope_system_prompt(history_tag),
+            user_prompt=user_prompt,
             schema=ScopeVerdict,
             thinking_config=types.ThinkingConfig(thinking_level=GATE_THINKING),
         )

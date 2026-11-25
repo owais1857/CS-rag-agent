@@ -1,8 +1,8 @@
-"""Central configuration for models, retrieval thresholds, and safety limits."""
+"""Central configuration for models, retrieval thresholds, memory, and safety limits."""
 
 # Gemini model IDs and thinking budgets
 # Hydrogen defaults to high thinking; LOW keeps synthesis fast and token-efficient.
-# Flash-Lite supports MINIMAL thinking for low-latency scope classification.
+# Flash-Lite supports MINIMAL thinking for low-latency scope and query rewriting.
 SYNTHESIS_MODEL = "gemini-4-hydrogen"
 SYNTHESIS_THINKING = "LOW"
 
@@ -21,6 +21,10 @@ MAX_ANSWER_CHARS = 900  # ~150-180 words; enforced in Python to avoid JSON trunc
 WEB_MAX_RESULTS = 3
 WEB_SNIPPET_MAX_CHARS = 900
 WEB_TIMEOUT_SECONDS = 10
+
+# Bounded session memory settings (constant O(1) context overhead)
+MEMORY_MAX_TURNS = 3
+MEMORY_ANSWER_MAX_CHARS = 900
 
 # Permitted domain scope for the input classifier
 CS_TOPICS = (

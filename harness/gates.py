@@ -21,7 +21,7 @@ INJECTION_PATTERNS = [
     re.compile(r"reveal\s+(your\s+)?(system\s+prompt|hidden\s+instructions)", re.IGNORECASE),
     re.compile(r"you\s+are\s+now\s+(in\s+)?(developer|jailbreak|dan)\s+mode", re.IGNORECASE),
     re.compile(r"system\s+prompt\s+override", re.IGNORECASE),
-    re.compile(r"</?\s*(system|instruction|web_context|context)\b", re.IGNORECASE),
+    re.compile(r"</?\s*(system|instruction|web_context|context|history)\b", re.IGNORECASE),
 ]
 
 # Zero-width spaces and bidirectional override characters used in hidden-text attacks
@@ -71,12 +71,18 @@ def redact_pii(text: str) -> str:
     return text
 
 
-def run_input_gate(query: str, llm: GeminiClient) -> tuple[str, str, dict]:
+def run_input_gate(
+    query: str,
+    llm: GeminiClient,
+    history_block: str = "",
+    history_tag: str = "",
+) -> tuple[str, str, dict]:
     """
-    Validate and classify a user query before retrieval.
+    Validate, classify, and optionally rewrite a user query before retrieval.
 
     Deterministic checks (empty input, length, injection, greetings) run first at
-    zero token cost; remaining queries are PII-redacted and checked for CS scope.
+    zero token cost; remaining queries are PII-redacted, checked for CS scope,
+    and resolved into a standalone query when session history is present.
 
     Returns:
         (status, payload, usage) where status is one of
@@ -110,7 +116,11 @@ def run_input_gate(query: str, llm: GeminiClient) -> tuple[str, str, dict]:
 
     cleaned = redact_pii(cleaned)
 
-    verdict, usage = llm.check_scope(cleaned)
+    verdict, usage = llm.check_scope(
+        cleaned,
+        history_block=history_block,
+        history_tag=history_tag,
+    )
     if not verdict.in_scope:
         return (
             "OUT_OF_SCOPE",
@@ -118,7 +128,9 @@ def run_input_gate(query: str, llm: GeminiClient) -> tuple[str, str, dict]:
             usage,
         )
 
-    return "ALLOW", cleaned, usage
+    resolved = strip_invisible_unicode(verdict.standalone_query).strip() or cleaned
+    resolved = redact_pii(resolved)
+    return "ALLOW", resolved, usage
 
 
 def run_retrieval_gate(

@@ -1,4 +1,4 @@
-"""Deterministic orchestrator for gated local RAG and human-approved web fallback."""
+"""Deterministic orchestrator for gated local RAG, web fallback, and session memory."""
 
 import secrets
 import time
@@ -11,6 +11,7 @@ from harness.gates import (
     validate_web_output,
 )
 from harness.llm import GeminiClient
+from harness.memory import SessionMemory
 from harness.web import WebSearcher
 from rag.retriever import LocalRetriever
 
@@ -54,16 +55,27 @@ def merge_usage(u1: dict, u2: dict) -> dict:
 
 
 class CSAgentHarness:
-    """UI-independent controller coordinating retrieval, gates, synthesis, and web fallback."""
+    """UI-independent controller coordinating retrieval, gates, synthesis, web fallback, and memory."""
 
     def __init__(self) -> None:
         self.retriever = LocalRetriever()
         self.llm = GeminiClient()
         self.web = WebSearcher()
+        self.memory = SessionMemory()
+
+    def clear_memory(self) -> None:
+        """Clear all stored conversation turns from session memory."""
+        self.memory.clear()
 
     def _elapsed_ms(self, start_time: float, human_wait_sec: float = 0.0) -> int:
         """Compute execution latency in milliseconds, excluding interactive user wait time."""
         return round((time.perf_counter() - start_time - human_wait_sec) * 1000)
+
+    def _memory_telemetry(self) -> dict:
+        return {
+            "memory_turns": len(self.memory),
+            "memory_max": self.memory.max_turns,
+        }
 
     def _handle_missing_context(
         self,
@@ -74,6 +86,7 @@ class CSAgentHarness:
         start_time: float,
         top_score: float,
         confirm_web: WebConfirmCallback | None,
+        rewritten_query: str | None,
     ) -> dict:
         """
         Handle local retrieval misses via an optional human-in-the-loop web fallback.
@@ -96,9 +109,11 @@ class CSAgentHarness:
                 "usage": usage,
                 "latency_ms": self._elapsed_ms(start_time, human_wait_sec),
                 "top_score": top_score,
+                "rewritten_query": rewritten_query,
+                **self._memory_telemetry(),
             }
 
-        # 1. Fetch and pre-filter web snippets (query is already PII-redacted)
+        # 1. Fetch and pre-filter web snippets (query is already standalone and PII-redacted)
         try:
             web_results, dropped_count, cache_hit = self.web.search(query)
         except Exception as exc:
@@ -108,6 +123,8 @@ class CSAgentHarness:
                 "usage": usage,
                 "latency_ms": self._elapsed_ms(start_time, human_wait_sec),
                 "top_score": top_score,
+                "rewritten_query": rewritten_query,
+                **self._memory_telemetry(),
             }
 
         # Short-circuit without synthesis if all returned snippets failed injection checks
@@ -121,7 +138,9 @@ class CSAgentHarness:
                 "usage": usage,
                 "latency_ms": self._elapsed_ms(start_time, human_wait_sec),
                 "top_score": top_score,
+                "rewritten_query": rewritten_query,
                 "web_meta": {"cache_hit": cache_hit, "dropped_snippets": dropped_count},
+                **self._memory_telemetry(),
             }
 
         if not web_results:
@@ -131,7 +150,9 @@ class CSAgentHarness:
                 "usage": usage,
                 "latency_ms": self._elapsed_ms(start_time, human_wait_sec),
                 "top_score": top_score,
+                "rewritten_query": rewritten_query,
                 "web_meta": {"cache_hit": cache_hit, "dropped_snippets": dropped_count},
+                **self._memory_telemetry(),
             }
 
         # 2. Single-pass web synthesis using a fresh per-request nonce delimiter
@@ -143,7 +164,13 @@ class CSAgentHarness:
         total_usage = merge_usage(usage, web_synth_usage)
 
         # 3. Verify cited web IDs, strip smuggled links, and resolve original URLs
-        final_status, formatted_output, _ = validate_web_output(web_answer, web_results)
+        final_status, formatted_output, bounded_answer = validate_web_output(
+            web_answer, web_results
+        )
+
+        # 4. Save verified web turn into session memory (passes post-synthesis injection filter)
+        if final_status == "DONE_WEB":
+            self.memory.add(query, bounded_answer, source="web")
 
         return {
             "status": final_status,
@@ -151,7 +178,9 @@ class CSAgentHarness:
             "usage": total_usage,
             "latency_ms": self._elapsed_ms(start_time, human_wait_sec),
             "top_score": top_score,
+            "rewritten_query": rewritten_query,
             "web_meta": {"cache_hit": cache_hit, "dropped_snippets": dropped_count},
+            **self._memory_telemetry(),
         }
 
     def ask(
@@ -160,7 +189,7 @@ class CSAgentHarness:
         confirm_web: WebConfirmCallback | None = None,
     ) -> dict:
         """
-        Process a user query through input gating, local RAG, and optional web fallback.
+        Process a user query through input gating, follow-up resolution, local RAG, and web fallback.
 
         Args:
             user_query: Raw question string from the caller.
@@ -169,8 +198,20 @@ class CSAgentHarness:
         """
         start = time.perf_counter()
 
-        # 1. Input gate (length, injection, greetings, PII redaction, CS scope)
-        gate_status, payload, gate_usage = run_input_gate(user_query, self.llm)
+        # Format rolling session history inside a per-request nonce tag when non-empty
+        history_tag = ""
+        history_block = ""
+        if not self.memory.is_empty():
+            history_tag = f"history_{secrets.token_hex(4)}"
+            history_block = self.memory.format_for_prompt(history_tag)
+
+        # 1. Input gate (length, injection, greetings, PII redaction, CS scope + rewrite)
+        gate_status, payload, gate_usage = run_input_gate(
+            user_query,
+            self.llm,
+            history_block=history_block,
+            history_tag=history_tag,
+        )
         if gate_status != "ALLOW":
             return {
                 "status": f"DONE_{gate_status}",
@@ -178,7 +219,13 @@ class CSAgentHarness:
                 "usage": gate_usage,
                 "latency_ms": self._elapsed_ms(start),
                 "top_score": None,
+                "rewritten_query": None,
+                **self._memory_telemetry(),
             }
+
+        rewritten_query = (
+            payload if payload.lower() != user_query.strip().lower() else None
+        )
 
         # 2. Local FAISS retrieval (read-only)
         chunks = self.retriever.search(payload, top_k=TOP_K)
@@ -194,6 +241,7 @@ class CSAgentHarness:
                 start_time=start,
                 top_score=top_score,
                 confirm_web=confirm_web,
+                rewritten_query=rewritten_query,
             )
 
         # 4. Grounded local synthesis with per-request nonce tags
@@ -214,10 +262,15 @@ class CSAgentHarness:
                 start_time=start,
                 top_score=top_score,
                 confirm_web=confirm_web,
+                rewritten_query=rewritten_query,
             )
 
         # 6. Output validation (citation verification, link stripping, character cap)
-        final_status, formatted_output, _ = validate_output(rag_answer, chunks)
+        final_status, formatted_output, bounded_answer = validate_output(rag_answer, chunks)
+
+        # 7. Save verified local turn into session memory
+        if final_status == "DONE_LOCAL":
+            self.memory.add(payload, bounded_answer, source="local")
 
         return {
             "status": final_status,
@@ -225,4 +278,6 @@ class CSAgentHarness:
             "usage": total_usage,
             "latency_ms": self._elapsed_ms(start),
             "top_score": top_score,
+            "rewritten_query": rewritten_query,
+            **self._memory_telemetry(),
         }
