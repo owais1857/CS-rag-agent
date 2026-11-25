@@ -1,6 +1,6 @@
 # CS Fundamentals RAG Agent
 
-A deterministic, token-efficient Computer Science study assistant built with local FAISS retrieval, a 2-stage sufficiency gate, and a human-in-the-loop (HITL) web search fallback.
+A deterministic, token-efficient Computer Science study assistant built with local FAISS retrieval, a 2-stage sufficiency gate, a human-in-the-loop (HITL) web search fallback, and bounded session memory.
 
 ## Architecture
 
@@ -9,8 +9,8 @@ A deterministic, token-efficient Computer Science study assistant built with loc
   - Deterministic input gate (length limit, prompt-injection patterns, 0-token greeting fast-path, PII redaction) + lightweight CS scope classifier (`gemini-3.5-flash-lite`, `MINIMAL` thinking).
   - **2-Stage Sufficiency Gate:** Stage 1 short-circuits clear local misses below a `0.67` cosine similarity floor (0 synthesis tokens); Stage 2 uses a Pydantic `sufficient_context` flag on synthesis (`gemini-4-hydrogen`, `LOW` thinking) to catch topics mentioned by name without explanation.
   - Programmatic citation verification and 900-character output capping.
-- **Phase 3A — HITL Web Fallback (`harness/web.py`):** On local misses, invokes a UI-independent `confirm_web` callback (fail-closed by default), queries Tavily (`basic` depth, `max_results=3`, session-cached), filters untrusted snippets for invisible Unicode and prompt-injection patterns, isolates context with per-request nonce tags, and strips smuggled links before resolving verified URLs.
-- **Phase 3B — Bounded Session Memory *(Planned)*:** Fixed-window `deque(maxlen=3)` storing only verified, capped `(query, answer, source)` turns with a post-synthesis write filter.
+- **Phase 3A — HITL Web Fallback (`harness/web.py`):** On local misses, invokes a UI-independent `confirm_web` callback (fail-closed by default), queries Tavily (`basic` depth, `max_results=3`, session-cached), normalizes untrusted snippets (stripping invisible Unicode, HTML tags, and irregular whitespace) before scanning for prompt-injection patterns, isolates context with per-request nonce tags, and strips smuggled links before resolving verified URLs.
+- **Phase 3B — Bounded Session Memory (`harness/memory.py`):** Fixed-window `deque(maxlen=3)` storing only verified, capped `(query, answer, source)` turns after a post-synthesis injection write filter. Feeds history inside a nonce-delimited tag into the Flash-Lite gate to resolve follow-up pronouns in zero extra API calls, with `/clear` reset support in the CLI.
 
 ## Project Structure
 
@@ -27,6 +27,7 @@ agent/
 │   ├── llm.py            # Provider-isolated google-genai wrapper
 │   ├── gates.py          # Input gate, 0.67 floor gate, citation/link validators
 │   ├── web.py            # Tavily search client, cache, and snippet filter
+│   ├── memory.py         # Bounded rolling session memory and write filter
 │   └── runner.py         # UI-independent orchestrator
 ├── main.py               # Interactive CLI entry point
 ├── .env.example          # Required environment variables template
