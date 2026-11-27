@@ -1,16 +1,25 @@
-"""Provider-isolated Gemini client with constrained Pydantic outputs."""
+"""Provider-isolated Gemini client with constrained Pydantic outputs, retries, and failover."""
 
 import os
+import random
+import time
 from typing import Type, TypeVar
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel, Field
 from harness.config import (
     CS_TOPICS,
+    FALLBACK_SYNTHESIS_MODEL,
+    FALLBACK_SYNTHESIS_THINKING,
     GATE_MODEL,
     GATE_THINKING,
     MAX_ANSWER_CHARS,
+    GEMINI_TIMEOUT_MS,
+    MAX_TRANSIENT_RETRIES,
+    RETRY_BASE_DELAY_SEC,
+    RETRY_JITTER_SEC,
+    RETRYABLE_HTTP_CODES,
     SYNTHESIS_MODEL,
     SYNTHESIS_THINKING,
 )
@@ -18,6 +27,28 @@ from harness.config import (
 load_dotenv()
 
 T = TypeVar("T", bound=BaseModel)
+
+_TRANSIENT_API_MARKERS = ("unavailable", "resource_exhausted", "deadline_exceeded", "internal")
+_TRANSIENT_TRANSPORT_TYPES = ("timeout", "connect", "network", "remoteprotocol", "readerror")
+
+
+class LLMCallError(RuntimeError):
+    """Raised when a Gemini call fails after exhausting bounded retries (and optional failover)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model: str,
+        retries: int = 0,
+        fallback_attempted: bool = False,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.model = model
+        self.retries = retries
+        self.fallback_attempted = fallback_attempted
+        self.status_code = status_code
 
 
 class ScopeVerdict(BaseModel):
@@ -49,6 +80,31 @@ class RAGAnswer(BaseModel):
         default_factory=list,
         description="Exact source IDs (e.g. 'chunk_26' or 'web_1') used to form the answer.",
     )
+
+
+def _extract_status_code(exc: Exception) -> int | None:
+    """Extract an integer HTTP status code from a Gemini SDK exception if present."""
+    for attr in ("code", "status_code"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int):
+            return val
+    return None
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Return True only for transient HTTP/rate-limit/server or network timeout failures."""
+    if isinstance(exc, errors.APIError):
+        code = _extract_status_code(exc)
+        if code is not None:
+            return code in RETRYABLE_HTTP_CODES
+        msg = str(exc).lower()
+        return any(marker in msg for marker in _TRANSIENT_API_MARKERS)
+
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+
+    exc_type = type(exc).__name__.lower()
+    return any(tok in exc_type for tok in _TRANSIENT_TRANSPORT_TYPES)
 
 
 def _build_scope_system_prompt(history_tag: str = "") -> str:
@@ -103,7 +159,7 @@ Rules:
 
 
 class GeminiClient:
-    """Thin wrapper around the google-genai SDK with no callable tools attached."""
+    """Thin wrapper around the google-genai SDK with timeouts, retries, failover, and zero tools."""
 
     def __init__(self) -> None:
         api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
@@ -111,7 +167,10 @@ class GeminiClient:
             raise RuntimeError(
                 "Missing GEMINI_API_KEY. Set your Google AI Studio key in .env first."
             )
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+        )
 
     def _generate_structured(
         self,
@@ -120,71 +179,153 @@ class GeminiClient:
         user_prompt: str,
         schema: Type[T],
         thinking_config: types.ThinkingConfig,
-    ) -> tuple[T, dict]:
-        """Run a constrained JSON generation call and return (parsed_model, token_usage)."""
+        max_retries: int = MAX_TRANSIENT_RETRIES,
+    ) -> tuple[T, dict, int]:
+        """Run a constrained JSON call with bounded transient backoff; return (parsed, usage, retries)."""
         # Omit a tight max_output_tokens limit because thinking tokens share that budget
         # and can truncate structured JSON mid-object; length is enforced in gates.py.
-        response = self.client.models.generate_content(
-            model=model,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=schema,
-                thinking_config=thinking_config,
-            ),
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=schema,
+            thinking_config=thinking_config,
         )
 
-        if response.parsed is not None:
-            parsed = response.parsed
-        elif response.text:
-            parsed = schema.model_validate_json(response.text)
-        else:
-            raise ValueError("Model returned an empty response.")
+        retries_used = 0
+        for attempt in range(max_retries + 1):
+            try:
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=user_prompt,
+                    config=config,
+                )
 
-        meta = response.usage_metadata
-        usage = {
-            "input_tokens": getattr(meta, "prompt_token_count", 0) or 0,
-            "output_tokens": getattr(meta, "candidates_token_count", 0) or 0,
-            "thinking_tokens": getattr(meta, "thoughts_token_count", 0) or 0,
-            "total_tokens": getattr(meta, "total_token_count", 0) or 0,
-        }
-        return parsed, usage
+                if response.parsed is not None:
+                    parsed = response.parsed
+                elif response.text:
+                    parsed = schema.model_validate_json(response.text)
+                else:
+                    raise ValueError("Model returned an empty response.")
+
+                meta = response.usage_metadata
+                in_tok = getattr(meta, "prompt_token_count", 0) or 0
+                out_tok = getattr(meta, "candidates_token_count", 0) or 0
+                think_tok = getattr(meta, "thoughts_token_count", 0) or 0
+                total_tok = getattr(meta, "total_token_count", 0) or (in_tok + out_tok + think_tok)
+                usage = {
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "thinking_tokens": think_tok,
+                    "total_tokens": total_tok,
+                }
+                return parsed, usage, retries_used
+            except Exception as exc:
+                if attempt >= max_retries or not _is_retryable(exc):
+                    raise LLMCallError(
+                        str(exc),
+                        model=model,
+                        retries=retries_used,
+                        status_code=_extract_status_code(exc),
+                    ) from exc
+
+                retries_used += 1
+                delay = (RETRY_BASE_DELAY_SEC * (2 ** attempt)) + random.uniform(
+                    -RETRY_JITTER_SEC, RETRY_JITTER_SEC
+                )
+                time.sleep(max(0.1, delay))
+
+        raise RuntimeError("Unreachable retry loop exit.")
 
     def check_scope(
         self,
         cleaned_query: str,
         history_block: str = "",
         history_tag: str = "",
-    ) -> tuple[ScopeVerdict, dict]:
+    ) -> tuple[ScopeVerdict, dict, dict]:
         """Classify CS scope and resolve follow-up pronouns when session history is present."""
         if history_block and history_tag:
             user_prompt = f"{history_block}\n\nCurrent user query: {cleaned_query}"
         else:
             user_prompt = f"User query: {cleaned_query}"
 
-        return self._generate_structured(
+        verdict, usage, retries = self._generate_structured(
             model=GATE_MODEL,
             system_instruction=_build_scope_system_prompt(history_tag),
             user_prompt=user_prompt,
             schema=ScopeVerdict,
             thinking_config=types.ThinkingConfig(thinking_level=GATE_THINKING),
+            max_retries=MAX_TRANSIENT_RETRIES,
         )
+        call_meta = {"model": GATE_MODEL, "retries": retries, "fallback_used": False}
+        return verdict, usage, call_meta
+
+    def _synthesize_with_failover(
+        self,
+        system_instruction: str,
+        user_prompt: str,
+    ) -> tuple[RAGAnswer, dict, dict]:
+        """Run primary synthesis with bounded retries and a single transient failover call."""
+        try:
+            answer, usage, retries = self._generate_structured(
+                model=SYNTHESIS_MODEL,
+                system_instruction=system_instruction,
+                user_prompt=user_prompt,
+                schema=RAGAnswer,
+                thinking_config=types.ThinkingConfig(thinking_level=SYNTHESIS_THINKING),
+                max_retries=MAX_TRANSIENT_RETRIES,
+            )
+            return answer, usage, {
+                "model": SYNTHESIS_MODEL,
+                "retries": retries,
+                "fallback_used": False,
+            }
+        except LLMCallError as primary_err:
+            orig_exc = primary_err.__cause__
+            can_failover = (
+                bool(FALLBACK_SYNTHESIS_MODEL)
+                and FALLBACK_SYNTHESIS_MODEL != SYNTHESIS_MODEL
+                and orig_exc is not None
+                and _is_retryable(orig_exc)
+            )
+            if not can_failover:
+                raise
+
+            try:
+                answer, usage, _ = self._generate_structured(
+                    model=FALLBACK_SYNTHESIS_MODEL,
+                    system_instruction=system_instruction,
+                    user_prompt=user_prompt,
+                    schema=RAGAnswer,
+                    thinking_config=types.ThinkingConfig(
+                        thinking_level=FALLBACK_SYNTHESIS_THINKING
+                    ),
+                    max_retries=0,  # Strictly one fallback attempt
+                )
+                return answer, usage, {
+                    "model": FALLBACK_SYNTHESIS_MODEL,
+                    "retries": primary_err.retries,
+                    "fallback_used": True,
+                }
+            except LLMCallError as fb_err:
+                raise LLMCallError(
+                    f"Primary ({SYNTHESIS_MODEL}) and fallback ({FALLBACK_SYNTHESIS_MODEL}) failed: {fb_err}",
+                    model=FALLBACK_SYNTHESIS_MODEL,
+                    retries=primary_err.retries,
+                    fallback_attempted=True,
+                    status_code=fb_err.status_code,
+                ) from fb_err
 
     def synthesize_answer(
         self,
         context_block: str,
         user_query: str,
         tag_name: str,
-    ) -> tuple[RAGAnswer, dict]:
+    ) -> tuple[RAGAnswer, dict, dict]:
         """Generate a grounded answer from local retrieved passages."""
         user_prompt = f"{context_block}\n\nUser Question: {user_query}"
-        return self._generate_structured(
-            model=SYNTHESIS_MODEL,
+        return self._synthesize_with_failover(
             system_instruction=_build_local_system_prompt(tag_name),
             user_prompt=user_prompt,
-            schema=RAGAnswer,
-            thinking_config=types.ThinkingConfig(thinking_level=SYNTHESIS_THINKING),
         )
 
     def synthesize_web_answer(
@@ -192,13 +333,10 @@ class GeminiClient:
         web_context_block: str,
         user_query: str,
         tag_name: str,
-    ) -> tuple[RAGAnswer, dict]:
+    ) -> tuple[RAGAnswer, dict, dict]:
         """Generate a single-pass grounded answer from sanitized web snippets."""
         user_prompt = f"{web_context_block}\n\nUser Question: {user_query}"
-        return self._generate_structured(
-            model=SYNTHESIS_MODEL,
+        return self._synthesize_with_failover(
             system_instruction=_build_web_system_prompt(tag_name),
             user_prompt=user_prompt,
-            schema=RAGAnswer,
-            thinking_config=types.ThinkingConfig(thinking_level=SYNTHESIS_THINKING),
         )

@@ -46,8 +46,14 @@ def main() -> None:
             extras.append(f"web_cache={web_meta['cache_hit']}")
             if web_meta["dropped_snippets"]:
                 extras.append(f"dropped={web_meta['dropped_snippets']}")
+        llm_meta = result.get("llm_meta") or {}
+        if llm_meta.get("retries"):
+            extras.append(f"retries={llm_meta['retries']}")
+        if llm_meta.get("fallback_used"):
+            extras.append(f"fallback={llm_meta.get('synthesis_model')}")
+        if llm_meta.get("error_code") is not None:
+            extras.append(f"http={llm_meta['error_code']}")
         extras.append(f"mem={result['memory_turns']}/{result['memory_max']}")
-
         extra_str = f" | {' | '.join(extras)}" if extras else ""
         print(
             f"\n--- [{result['status']}{extra_str} | {result['latency_ms']}ms | "

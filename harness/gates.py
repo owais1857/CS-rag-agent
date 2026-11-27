@@ -43,6 +43,12 @@ ZERO_USAGE = {
     "total_tokens": 0,
 }
 
+ZERO_GATE_META = {
+    "model": None,
+    "retries": 0,
+    "fallback_used": False,
+}
+
 
 def strip_invisible_unicode(text: str) -> str:
     """Remove zero-width and bidirectional control characters."""
@@ -76,28 +82,25 @@ def run_input_gate(
     llm: GeminiClient,
     history_block: str = "",
     history_tag: str = "",
-) -> tuple[str, str, dict]:
+) -> tuple[str, str, dict, dict]:
     """
     Validate, classify, and optionally rewrite a user query before retrieval.
 
-    Deterministic checks (empty input, length, injection, greetings) run first at
-    zero token cost; remaining queries are PII-redacted, checked for CS scope,
-    and resolved into a standalone query when session history is present.
-
     Returns:
-        (status, payload, usage) where status is one of
+        (status, payload, usage, gate_meta) where status is one of
         'BLOCKED', 'GREETING', 'OUT_OF_SCOPE', or 'ALLOW'.
     """
     cleaned = strip_invisible_unicode(query).strip()
 
     if not cleaned:
-        return "BLOCKED", "Please enter a CS fundamentals question.", dict(ZERO_USAGE)
+        return "BLOCKED", "Please enter a CS fundamentals question.", dict(ZERO_USAGE), dict(ZERO_GATE_META)
 
     if len(cleaned) > MAX_INPUT_CHARS:
         return (
             "BLOCKED",
             f"Query too long ({len(cleaned)} chars). Keep questions under {MAX_INPUT_CHARS} characters.",
             dict(ZERO_USAGE),
+            dict(ZERO_GATE_META),
         )
 
     if contains_injection(cleaned):
@@ -105,6 +108,7 @@ def run_input_gate(
             "BLOCKED",
             "I cannot override my instructions. Please ask a Computer Science fundamentals question.",
             dict(ZERO_USAGE),
+            dict(ZERO_GATE_META),
         )
 
     if GREETING_PATTERN.match(cleaned):
@@ -112,11 +116,12 @@ def run_input_gate(
             "GREETING",
             "Hello! Ask me any Computer Science fundamentals question and I'll check your local notes.",
             dict(ZERO_USAGE),
+            dict(ZERO_GATE_META),
         )
 
     cleaned = redact_pii(cleaned)
 
-    verdict, usage = llm.check_scope(
+    verdict, usage, gate_meta = llm.check_scope(
         cleaned,
         history_block=history_block,
         history_tag=history_tag,
@@ -126,11 +131,12 @@ def run_input_gate(
             "OUT_OF_SCOPE",
             "Out of scope: I only answer Computer Science fundamentals questions.",
             usage,
+            gate_meta,
         )
 
     resolved = strip_invisible_unicode(verdict.standalone_query).strip() or cleaned
     resolved = redact_pii(resolved)
-    return "ALLOW", resolved, usage
+    return "ALLOW", resolved, usage, gate_meta
 
 
 def run_retrieval_gate(

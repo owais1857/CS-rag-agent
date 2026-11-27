@@ -1,6 +1,6 @@
 # CS Fundamentals RAG Agent
 
-A deterministic, token-efficient Computer Science study assistant built with local FAISS retrieval, a 2-stage sufficiency gate, a human-in-the-loop (HITL) web search fallback, and bounded session memory.
+A deterministic, token-efficient Computer Science study assistant built with local FAISS retrieval, a 2-stage sufficiency gate, a human-in-the-loop (HITL) web search fallback, bounded session memory, transient retry/failover resilience, privacy-safe runtime/audit logging, and offline evaluation.
 
 ## Architecture
 
@@ -11,6 +11,9 @@ A deterministic, token-efficient Computer Science study assistant built with loc
   - Programmatic citation verification and 900-character output capping.
 - **Phase 3A — HITL Web Fallback (`harness/web.py`):** On local misses, invokes a UI-independent `confirm_web` callback (fail-closed by default), queries Tavily (`basic` depth, `max_results=3`, session-cached), normalizes untrusted snippets (stripping invisible Unicode, HTML tags, and irregular whitespace) before scanning for prompt-injection patterns, isolates context with per-request nonce tags, and strips smuggled links before resolving verified URLs.
 - **Phase 3B — Bounded Session Memory (`harness/memory.py`):** Fixed-window `deque(maxlen=3)` storing only verified, capped `(query, answer, source)` turns after a post-synthesis injection write filter. Feeds history inside a nonce-delimited tag into the Flash-Lite gate to resolve follow-up pronouns in zero extra API calls, with `/clear` reset support in the CLI.
+- **Phase 4A — Resilience & Model Failover (`harness/config.py`, `harness/llm.py`):** Configures per-request HTTP timeouts (`60s`), bounded exponential backoff with jitter (`2s`, `4s`) strictly on transient errors (`408`, `429`, `500`, `502`, `503`, `504`, or network timeouts), single-shot failover to `gemini-3.8-flash` when primary synthesis exhausts retries on a transient error, and structured `DONE_LLM_ERROR` reporting without crashing turns.
+- **Phase 4B — Runtime Telemetry & Security Audit Logs (`harness/telemetry.py`, `harness/runner.py`):** Emits two append-only, thread-safe JSONL streams under `logs/` (gitignored), correlated by `(session_id, turn_id, query_sha256)` without storing raw user text or PII: `logs/runtime.jsonl` for per-turn latency, scores, tokens, retries/failover, web cache flags, and memory occupancy; `logs/audit.jsonl` for blocks, PII redactions, HITL decisions, filtered web snippets, memory write rejections/clears, failovers, and errors.
+- **Phase 4C — Offline Evaluation (`eval/`):** Provides a default 0-token retrieval evaluation (`Hit Rate@k`, `Recall@k`, `MRR`, and similarity floor pass rate) plus an opt-in `--judge` mode (`gemini-3.5-flash-lite` claim-level groundedness) with `--limit` support, telemetry disabled during eval runs, and auto-updated reporting to `logs/eval_report.json`.
 
 ## Project Structure
 
@@ -22,13 +25,20 @@ agent/
 ├── rag/
 │   ├── ingest.py         # Offline PDF-to-FAISS indexing pipeline
 │   └── retriever.py      # Read-only LocalRetriever
+├── eval/
+│   ├── __init__.py
+│   ├── golden_set.json   # Curated CS evaluation queries & expected chunk IDs
+│   ├── judge.py          # Opt-in claim-level groundedness judge
+│   └── run_eval.py       # Retrieval metrics (default) & opt-in --judge runner
 ├── harness/
-│   ├── config.py         # Models, thinking levels, thresholds, and caps
-│   ├── llm.py            # Provider-isolated google-genai wrapper
+│   ├── config.py         # Models, thinking levels, thresholds, caps, resilience & eval flags
+│   ├── llm.py            # Provider-isolated google-genai wrapper with retry & failover
 │   ├── gates.py          # Input gate, 0.67 floor gate, citation/link validators
 │   ├── web.py            # Tavily search client, cache, and snippet filter
 │   ├── memory.py         # Bounded rolling session memory and write filter
-│   └── runner.py         # UI-independent orchestrator
+│   ├── telemetry.py      # Privacy-safe runtime.jsonl and audit.jsonl writers
+│   └── runner.py         # UI-independent orchestrator and telemetry hook
+├── logs/                 # Generated runtime.jsonl, audit.jsonl & eval_report.json (gitignored)
 ├── main.py               # Interactive CLI entry point
 ├── .env.example          # Required environment variables template
 └── requirements.txt
@@ -55,4 +65,13 @@ agent/
 4. **Run the agent:**
    ```powershell
    python main.py
+   ```
+
+5. **Run offline evaluation (optional):**
+   ```powershell
+   # Retrieval-only (0 API tokens): Hit Rate@3, Recall@3, MRR, floor pass rate
+   python -m eval.run_eval
+
+   # Opt-in groundedness judge on a bounded slice (saves to logs/eval_report.json)
+   python -m eval.run_eval --judge --limit 5
    ```

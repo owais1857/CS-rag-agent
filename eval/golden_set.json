@@ -1,0 +1,77 @@
+[
+  {
+    "id": "ds_recursion_vs_iteration",
+    "query": "What is the difference between recursion and iteration?",
+    "expected_chunk_ids": ["chunk_26"]
+  },
+  {
+    "id": "ds_array_address_formula",
+    "query": "How do you calculate the memory address of an element in a 1D array?",
+    "expected_chunk_ids": ["chunk_32"]
+  },
+  {
+    "id": "ds_bubble_vs_selection_sort",
+    "query": "Compare bubble sort and selection sort in terms of time complexity, space complexity, and stability.",
+    "expected_chunk_ids": ["chunk_45"]
+  },
+  {
+    "id": "ds_binary_search",
+    "query": "What is binary search and how does it work?",
+    "expected_chunk_ids": ["chunk_51", "chunk_52"]
+  },
+  {
+    "id": "ds_binary_search_complexity",
+    "query": "What is the time complexity of binary search and how is it derived?",
+    "expected_chunk_ids": ["chunk_54"]
+  },
+  {
+    "id": "ds_heap_operations",
+    "query": "What are the main heap operations like insertion, deletion, peek, and heapify with their time complexities?",
+    "expected_chunk_ids": ["chunk_57"]
+  },
+  {
+    "id": "ds_stack_memory_rep",
+    "query": "How is a stack represented in memory using an array versus a linked list, and what are stack overflow and underflow?",
+    "expected_chunk_ids": ["chunk_62"]
+  },
+  {
+    "id": "ds_circular_queue",
+    "query": "What is a circular queue and how does it overcome the drawbacks of a linear queue?",
+    "expected_chunk_ids": ["chunk_76", "chunk_77"]
+  },
+  {
+    "id": "ds_array_vs_linked_list",
+    "query": "What are the differences between an array and a linked list?",
+    "expected_chunk_ids": ["chunk_96"]
+  },
+  {
+    "id": "ds_avl_trees_and_rotations",
+    "query": "What is an AVL tree, what is its balance factor, and what rotations are used to balance it?",
+    "expected_chunk_ids": ["chunk_136", "chunk_137"]
+  },
+  {
+    "id": "net_osi_model",
+    "query": "Why is the OSI layered network model used and what are its seven layers?",
+    "expected_chunk_ids": ["chunk_142"]
+  },
+  {
+    "id": "net_physical_media_comparison",
+    "query": "Compare twisted pair, coaxial, fiber optic, and wireless LAN in terms of bandwidth, distance, and price.",
+    "expected_chunk_ids": ["chunk_145"]
+  },
+  {
+    "id": "net_mac_and_switch",
+    "query": "What is a MAC address and how does a switch forward data at the Data Link layer?",
+    "expected_chunk_ids": ["chunk_146"]
+  },
+  {
+    "id": "net_ip_and_network_devices",
+    "query": "What is an IP address and what devices operate at the Network layer?",
+    "expected_chunk_ids": ["chunk_147"]
+  },
+  {
+    "id": "net_gateway",
+    "query": "What is a gateway in computer networking and what does it do?",
+    "expected_chunk_ids": ["chunk_148"]
+  }
+]

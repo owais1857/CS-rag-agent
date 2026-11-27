@@ -16,3 +16,5 @@ data/index/
 .vscode/
 .DS_Store
 Thumbs.db
+# Runtime telemetry and security audit logs
+logs/
